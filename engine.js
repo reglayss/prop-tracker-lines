@@ -344,10 +344,15 @@ function fetchUnderdog_(notes) {
     var stat = (UD_STAT[sport] || {})[st.stat]; if (!stat) return;
     var start = new Date(g.scheduled_at); if (!(start.getTime() > now)) return;
     var hi = l.options.filter(function (o) { return o.choice === 'higher'; })[0], lo = l.options.filter(function (o) { return o.choice === 'lower'; })[0]; if (!hi || !lo) return;
-    var type = Math.abs(Number(hi.payout_multiplier || 1) - 1) < 0.001 && Math.abs(Number(lo.payout_multiplier || 1) - 1) < 0.001 ? 'Standard' : 'Payout x' + hi.payout_multiplier;
     var px = function (o) { var v = o.american_price; return v == null || v === '' ? '' : Number(String(v).replace('+', '')); };
-    out.push({ sport: sport, game: String(g.full_team_names_title || g.abbreviated_title || ''), start: start, bookKey: 'underdog', book: 'Underdog',
-      player: String((p.first_name || '') + ' ' + (p.last_name || '')).trim(), stat: stat, line: Number(l.stat_value), over: px(hi), under: px(lo), type: type, sides: 'OU' });
+    var mh = Number(hi.payout_multiplier || 1), ml = Number(lo.payout_multiplier || 1);
+    var base = { sport: sport, game: String(g.full_team_names_title || g.abbreviated_title || ''), start: start, bookKey: 'underdog', book: 'Underdog',
+      player: String((p.first_name || '') + ' ' + (p.last_name || '')).trim(), stat: stat, line: Number(l.stat_value) };
+    if (Math.abs(mh - 1) < 0.001 && Math.abs(ml - 1) < 0.001) out.push(Object.assign({ over: px(hi), under: px(lo), type: 'Standard', sides: 'OU' }, base));
+    else {   // each side pays its own multiplier (e.g. Higher 1.2x, Lower 0.85x), so keep them apart
+      out.push(Object.assign({ over: px(hi), under: '', type: Math.abs(mh - 1) < 0.001 ? 'Standard' : 'Payout x' + mh, sides: 'O' }, base));
+      out.push(Object.assign({ over: '', under: px(lo), type: Math.abs(ml - 1) < 0.001 ? 'Standard' : 'Payout x' + ml, sides: 'U' }, base));
+    }
   });
   return out;
 }
