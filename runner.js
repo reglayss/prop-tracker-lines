@@ -70,7 +70,8 @@ const SPORTS_LIST = (process.env.SPORTS || 'basketball_nba,football_nfl,hockey_n
 const BOOKS = (process.env.BOOKS || 'prizepicks,underdog,pinnacle,draftkings,fanduel,betmgm').split(',');
 let pl = []; try { pl = JSON.parse(fs.readFileSync('pl_rows.json', 'utf8')); } catch (e) {}
 const lastPL = Number(state.props.GH_PL_AT || 0);
-const wantPL = process.env.FORCE_PL === '1' || (AUTO_PULL_HOURS.indexOf(ctHour) >= 0 && now() - lastPL > 55 * 60000);
+const PL_HOURS = [0, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23];   // PropLine every hour 7 AM to midnight (~80 requests a pull)
+const wantPL = process.env.FORCE_PL === '1' || (PL_HOURS.indexOf(ctHour) >= 0 && now() - lastPL > 50 * 60000);
 let notes = [];
 if (wantPL && SECRET.PROPLINE_KEY && !quotaHitToday_()) {
   try {
