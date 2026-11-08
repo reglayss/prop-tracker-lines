@@ -145,6 +145,7 @@ function evaluate(o) {
     else if (evS < 0 && grade !== 'Pass') { why.push('game logs do not support it (' + Math.round(ps * 100) + '%)'); grade = 'Pass'; }
     if (l5.length === 5 && hits5 <= 1 && grade !== 'Pass') { why.push('lost ' + (5 - hits5) + ' of the last 5'); grade = 'Pass'; }
     if (pr && pr.n < 10 && grade === 'Play') grade = 'Lean';
+    if (sOver != null && Math.abs(sOver - o.mkt.over) >= 0.15 && grade === 'Play') { grade = 'Lean'; why.push('capped at Lean: stats and books far apart'); }
     if (o.mkt.q === 'single' && grade === 'Play') grade = 'Lean';
     if (o.inj === 'out') { why.unshift('player listed out'); grade = 'Pass'; }
     if (o.inj === 'q' && grade === 'Play') { why.push('questionable'); grade = 'Lean'; }
