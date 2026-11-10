@@ -104,7 +104,7 @@ function market(books) {
   let w = 0, s = 0, pin = false; const used = [];
   for (const y of books) { if (placeholder(y)) continue; const v = devig(ip(y.over), ip(y.under)); if (v == null) continue; const k = W2(y.book); w += k; s += v * k; if (/pinnacle/i.test(y.book)) pin = true; used.push(y.book + ' ' + y.over + '/' + y.under); }
   if (!w) return null;
-  return { over: s / w, q: pin ? 'sharp' : used.length >= 2 ? 'multi' : 'single', books: used };
+  return { over: s / w, q: pin ? 'sharp' : used.length >= 2 ? 'multi' : 'single', sharp: pin, books: used };
 }
 const lg = p => Math.log(p / (1 - p)), sg = z => 1 / (1 + Math.exp(-z)), cl = p => Math.min(0.98, Math.max(0.02, p));
 
@@ -131,7 +131,8 @@ function evaluate(o) {
   if (!pr || pr.err) { out.grade = 'Pass'; out.flags.push(pr && pr.err ? pr.err : 'no game log'); }
   const pOver = pCal(o.mkt.over);
   let sOver = null;
-  if (pr && !pr.err) { const s = sides(o.line, pr.mu, pr.v, pr.count); sOver = s.over / ((s.over + s.under) || 1); out.flags.push(...pr.flags); }
+  if (pr && !pr.err) { if (pr.pOver != null) sOver = pr.pOver; else { const s = sides(o.line, pr.mu, pr.v, pr.count); sOver = s.over / ((s.over + s.under) || 1); } out.flags.push(...pr.flags); }
+  if (o.mkt.q === 'derived') out.flags.push('books price the match, not this prop: ' + o.mkt.from);
   out.pBooks = o.mkt.over; out.pCal = pOver; out.pStats = sOver;
   if (sOver != null && Math.abs(sOver - o.mkt.over) >= 0.15) out.flags.push('game logs and books disagree (' + Math.round(sOver * 100) + '% vs ' + Math.round(o.mkt.over * 100) + '% over)');
   for (const sd of ['Over', 'Under']) {
@@ -146,7 +147,12 @@ function evaluate(o) {
     if (l5.length === 5 && hits5 <= 1 && grade !== 'Pass') { why.push('lost ' + (5 - hits5) + ' of the last 5'); grade = 'Pass'; }
     if (pr && pr.n < 10 && grade === 'Play') grade = 'Lean';
     if (sOver != null && Math.abs(sOver - o.mkt.over) >= 0.15 && grade === 'Play') { grade = 'Lean'; why.push('capped at Lean: stats and books far apart'); }
-    if (o.mkt.q === 'single' && grade === 'Play') grade = 'Lean';
+    if ((o.mkt.q === 'single' || o.mkt.q === 'derived') && grade === 'Play') grade = 'Lean';
+    if (o.tennis && grade === 'Play') { grade = 'Lean'; why.push('tennis: Lean until the tracker proves it'); }
+    if (p < 0.35 && grade !== 'Pass') {   // long shots need the sharpest price and never rate above Lean
+      if (!o.mkt.sharp) { why.push('long shot without a Pinnacle price'); grade = 'Pass'; }
+      else if (grade === 'Play') { grade = 'Lean'; why.push('long shot: capped at Lean'); }
+    }
     if (o.inj === 'out') { why.unshift('player listed out'); grade = 'Pass'; }
     if (o.inj === 'q' && grade === 'Play') { why.push('questionable'); grade = 'Lean'; }
     out.sides[sd] = { grade, pay: m, p, pStats: ps, pBooksSide: sd === 'Over' ? o.mkt.over : 1 - o.mkt.over, ev, evStats: evS, hits5, why };
@@ -194,6 +200,79 @@ async function injuries(sp) {
 }
 async function pool(items, n, fn) { let i = 0; await Promise.all(Array.from({ length: n }, async () => { while (i < items.length) { const k = items[i++]; try { await fn(k); } catch (e) {} } })); }
 
+// ---------------- tennis: ESPN scores (games per set) + match prices from the books ----------------
+const TEN = /^(Games Won|Total Games|Sets Won|Total Sets|Tiebreaks Played|1st Set Games Won|1st Set Total Games)$/;
+function slimTen(j) {
+  const out = [];
+  (j && j.events || []).forEach(e => (e.groupings || [{ competitions: e.competitions }]).forEach(g => (g.competitions || []).forEach(c => {
+    const st = c.status && c.status.type || {}; if (!c.competitors || c.competitors.length !== 2) return;
+    out.push({ id: c.id, d: String(c.date || '').slice(0, 10), done: !!st.completed, s: String(st.name || ''), p: c.competitors.map(x => ({ n: x.athlete && x.athlete.displayName || '', w: !!x.winner, ls: (x.linescores || []).map(l => [Number(l.value), l.tiebreak == null ? null : Number(l.tiebreak)]) })) });
+  })));
+  return out;
+}
+async function tennisHistory(fresh) {
+  const days = []; for (let k = 0; k <= 56; k += 7) days.push(new Date(now - k * 86400000).toISOString().slice(0, 10).replace(/-/g, ''));
+  if (fresh) days.push(new Date(now - 86400000).toISOString().slice(0, 10).replace(/-/g, ''));
+  const jobs = []; for (const tour of ['atp', 'wta']) for (const d of days) jobs.push([tour, d]);
+  const M = {};
+  await pool(jobs, 6, async ([tour, d]) => {
+    const f = CACHE_DIR + '/ten_' + tour + '_' + d + '.json', c = rd(f, null);
+    const age = now - Date.parse(d.slice(0, 4) + '-' + d.slice(4, 6) + '-' + d.slice(6) + 'T00:00:00Z');
+    let ms = c && (age > 12 * 86400000 || now - c.t < (fresh ? 1800000 : 4 * 3600000)) ? c.m : null;
+    if (!ms) { const j = await getJ('https://site.api.espn.com/apis/site/v2/sports/tennis/' + tour + '/scoreboard?dates=' + d); if (j) { ms = slimTen(j); wr(f, { t: now, m: ms }); } else if (c) ms = c.m; }
+    (ms || []).forEach(m => { M[m.id] = m; });
+  });
+  const H = {};   // player -> matches, newest first
+  Object.values(M).forEach(m => m.p.forEach((pl, i) => { const k = norm(pl.n); if (!k) return; (H[k] = H[k] || []).push({ m, i }); }));
+  Object.values(H).forEach(a => a.sort((x, y) => y.m.d.localeCompare(x.m.d)));
+  return H;
+}
+function tenVal(m, i, st) {
+  const a = m.p[i].ls, b = m.p[1 - i].ls, n = Math.min(a.length, b.length); if (!n) return null;
+  let gw = 0, gl = 0, sw = 0, tb = 0;
+  for (let k = 0; k < n; k++) { gw += a[k][0]; gl += b[k][0]; if (a[k][0] > b[k][0]) sw++; if (a[k][1] != null || b[k][1] != null || (a[k][0] + b[k][0] === 13)) tb++; }
+  return { 'Games Won': gw, 'Total Games': gw + gl, 'Sets Won': sw, 'Total Sets': n, 'Tiebreaks Played': tb, '1st Set Games Won': a[0][0], '1st Set Total Games': a[0][0] + b[0][0] }[st];
+}
+const tenFinal = m => m.done && /FINAL/i.test(m.s) && !/RETIR|WALKOVER|ABANDON|DEFAULT/i.test(m.s);
+function projectTennis(H, player, st, line, before) {
+  if (!TEN.test(st)) return { err: 'no free stats source for this market' };
+  const hist = (H[norm(player)] || []).filter(x => tenFinal(x.m) && x.m.d < before).slice(0, 20);
+  const games = hist.map(x => ({ v: tenVal(x.m, x.i, st), date: x.m.d })).filter(g => g.v != null);
+  const n = games.length; if (n < 5) return { err: 'only ' + n + ' finished matches found', n };
+  let sw = 0, sh = 0;   // weighted hit rate on this exact line, pulled toward 50/50 so a few matches cannot dominate
+  games.forEach((g, i) => { const w = Math.pow(0.5, i / 8); sw += w; if (g.v > line) sh += w; });
+  const avg = a => a.reduce((s, x) => s + x, 0) / (a.length || 1);
+  const ws = games.map(g => g.v === line ? null : g.v).filter(v => v != null);
+  return { pOver: (sh + 1.5) / (sw + 3), games, n, flags: [], mu: avg(games.slice(0, 10).map(g => g.v)), l5: avg(games.slice(0, 5).map(g => g.v)), l10: avg(games.slice(0, 10).map(g => g.v)), l20: avg(games.map(g => g.v)), push: ws.length !== games.length };
+}
+function invPhi(p) {   // Acklam's inverse normal
+  const a = [-39.6968302866538, 220.946098424521, -275.928510446969, 138.357751867269, -30.6647980661472, 2.50662827745924], b = [-54.4760987982241, 161.585836858041, -155.698979859887, 66.8013118877197, -13.2806815528857], c = [-0.00778489400243029, -0.322396458041136, -2.40075827716184, -2.54973253934373, 4.37466414146497, 2.93816398269878], d = [0.00778469570904146, 0.32246712907004, 2.445134137143, 3.75440866190742];
+  p = Math.min(0.999, Math.max(0.001, p)); const pl = 0.02425;
+  if (p < pl) { const q = Math.sqrt(-2 * Math.log(p)); return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1); }
+  if (p > 1 - pl) { const q = Math.sqrt(-2 * Math.log(1 - p)); return -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1); }
+  const q = p - 0.5, r = q * q; return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1);
+}
+// player prop chance from the match prices (total games, game spread, match winner)
+const SD_T = 4.5, SD_M = 4.5, RHO = -0.3;
+function tennisDerived(T, player, st, line) {
+  const mine = T[norm(player)] || {}, best = arr => arr && arr.length ? (arr.find(x => x.sharp) || arr[0]) : null;
+  const tot = best(mine['Total Games']), spr = best(mine['Games Spread']), win = best(mine['Sets Won|1.5']);
+  const z = x => invPhi(x);
+  if (st === 'Total Games' && tot) { const mu = tot.line + SD_T * z(tot.p); return { over: 1 - Phi((Math.ceil(line) - 0.5 - mu) / SD_T), q: 'derived', sharp: tot.sharp, books: [tot.src], from: 'match total ' + tot.line }; }
+  if (st === 'Games Won' && tot && spr) {
+    const muT = tot.line + SD_T * z(tot.p), muM = -spr.line + SD_M * z(spr.p);
+    const mu = (muT + muM) / 2, sd = Math.sqrt(SD_T * SD_T + SD_M * SD_M + 2 * RHO * SD_T * SD_M) / 2;
+    return { over: 1 - Phi((Math.ceil(line) - 0.5 - mu) / sd), q: 'derived', sharp: tot.sharp && spr.sharp, books: [tot.src, spr.src], from: 'match total ' + tot.line + ' and spread ' + spr.line };
+  }
+  if (win && (st === 'Sets Won' || st === 'Total Sets')) {
+    let lo = 0, hi = 1; for (let i = 0; i < 40; i++) { const s = (lo + hi) / 2; if (s * s * (3 - 2 * s) < win.p) lo = s; else hi = s; }
+    const s = (lo + hi) / 2;   // chance to win any one set (best of 3)
+    if (st === 'Sets Won' && line === 0.5) return { over: 1 - (1 - s) * (1 - s), q: 'derived', sharp: win.sharp, books: [win.src], from: 'match winner price' };
+    if (st === 'Total Sets' && line === 2.5) return { over: 2 * s * (1 - s), q: 'derived', sharp: win.sharp, books: [win.src], from: 'match winner price' };
+  }
+  return null;
+}
+
 // ---------------- main ----------------
 (async () => {
   const L = rd('lines.json', { rows: [] }).rows || [];
@@ -203,23 +282,33 @@ async function pool(items, n, fn) { let i = 0; await Promise.all(Array.from({ le
   // sportsbook prices by exact line
   const books = new Map();
   for (const x of L) if (SB.test(x.book) && x.type === 'Standard') { const k = [x.sport, x.game, x.player, x.stat, x.line].join('|'); (books.get(k) || books.set(k, []).get(k)).push(x); }
-  const cand = L.filter(x => isApp(x.book) && (x.type === 'Standard' || /^Payout x/.test(x.type)) && LG[x.sport] && Date.parse(x.start) > now && Date.parse(x.start) < now + 36 * 3600000);
+  const cand = L.filter(x => isApp(x.book) && (x.type === 'Standard' || /^Payout x/.test(x.type)) && (LG[x.sport] || x.sport === 'Tennis') && Date.parse(x.start) > now && Date.parse(x.start) < now + 36 * 3600000);
+  // tennis: books are matched by player (match titles differ between feeds); match prices feed the derived chances
+  const tExact = new Map(), T = {};
+  for (const x of L) if (x.sport === 'Tennis' && SB.test(x.book) && x.type === 'Standard' && !placeholder(x)) {
+    const k = [norm(x.player), x.stat, x.line].join('|'); (tExact.get(k) || tExact.set(k, []).get(k)).push(x);
+    const v = devig(ip(x.over), ip(x.under)); if (v == null) continue;
+    const tk = x.stat === 'Sets Won' ? 'Sets Won|' + x.line : x.stat; if (!/^(Total Games|Games Spread|Sets Won\|1\.5)$/.test(tk)) continue;
+    const pn = norm(x.player); T[pn] = T[pn] || {}; (T[pn][tk] = T[pn][tk] || []).push({ line: Number(x.line), p: v, sharp: /pinnacle/i.test(x.book), src: x.book + ' ' + x.over + '/' + x.under });
+  }
+  const TH = cand.some(x => x.sport === 'Tennis') ? await tennisHistory(false) : {};
   // game logs for everyone who has a priced line
   const need = [...new Set(cand.filter(x => books.has([x.sport, x.game, x.player, x.stat, x.line].join('|')) && supported(x.sport, x.stat)).map(x => x.sport + '|' + x.player))];
   const GL = {};
   await pool(need, 10, async k => { const [sp, pl] = k.split('|'); GL[k] = await gameLog(sp, pl); });
-  const INJ = {}; for (const sp of [...new Set(cand.map(x => x.sport))]) INJ[sp] = await injuries(sp);
+  const INJ = {}; for (const sp of [...new Set(cand.map(x => x.sport))]) if (LG[sp]) INJ[sp] = await injuries(sp);
   // evaluate
   const verdicts = {}, board = [];
   for (const x of cand) {
-    const bk = books.get([x.sport, x.game, x.player, x.stat, x.line].join('|'));
-    const mkt = bk ? market(bk) : null;
+    const ten = x.sport === 'Tennis';
+    const bk = ten ? tExact.get([norm(x.player), x.stat, x.line].join('|')) : books.get([x.sport, x.game, x.player, x.stat, x.line].join('|'));
+    const mkt = (bk ? market(bk) : null) || (ten ? tennisDerived(T, x.player, x.stat, Number(x.line)) : null);
     const mult = /^Payout x/.test(x.type) ? Number(x.type.split('x')[1]) : 1;
     const pay = { Over: null, Under: null };
     if (x.sides === 'O') pay.Over = mult; else if (x.sides === 'U') pay.Under = mult; else { pay.Over = 1; pay.Under = 1; }
     const before = new Date(Date.parse(x.start)).toISOString().slice(0, 10);
-    const pr = supported(x.sport, x.stat) ? project(GL[x.sport + '|' + x.player], x.sport, x.stat, before) : { err: 'no free stats source for this market' };
-    const ev = evaluate({ line: Number(x.line), pr, mkt, pay, inj: (INJ[x.sport] || {})[norm(x.player)] || '' });
+    const pr = ten ? projectTennis(TH, x.player, x.stat, Number(x.line), before) : supported(x.sport, x.stat) ? project(GL[x.sport + '|' + x.player], x.sport, x.stat, before) : { err: 'no free stats source for this market' };
+    const ev = evaluate({ line: Number(x.line), pr, mkt, pay, tennis: ten, inj: (INJ[x.sport] || {})[norm(x.player)] || '' });
     for (const sd of Object.keys(ev.sides)) {
       const s = ev.sides[sd];
       const key = [x.sport, x.player, x.stat, x.line, x.book, sd].join('|');
@@ -231,7 +320,7 @@ async function pool(items, n, fn) { let i = 0; await Promise.all(Array.from({ le
     }
     if (!ev.side && !Object.keys(ev.sides).length) verdicts[[x.sport, x.player, x.stat, x.line, x.book, 'any'].join('|')] = ['Pass', null, null, null, ev.flags.join(' · ')];
     // calibration data: one row per prop (books' pregame over price), graded later
-    if (mkt) { const pk = [x.sport, x.player, x.stat, x.line, before].join('|'); pending[pk] = { p: +mkt.over.toFixed(4), sport: x.sport, player: x.player, stat: x.stat, line: Number(x.line), start: x.start }; }
+    if (mkt && mkt.q !== 'derived') { const pk = [x.sport, x.player, x.stat, x.line, before].join('|'); pending[pk] = { p: +mkt.over.toFixed(4), sport: x.sport, player: x.player, stat: x.stat, line: Number(x.line), start: x.start }; }
   }
   board.sort((a, b) => (b.grade === 'Play') - (a.grade === 'Play') || b.ev - a.ev);
   // track every recommendation; the last pregame version is what counts
@@ -252,7 +341,13 @@ async function pool(items, n, fn) { let i = 0; await Promise.all(Array.from({ le
   const dueCal = Object.entries(pending).filter(([k, v]) => Date.parse(v.start) < now - 3.5 * 3600000);
   const players = [...new Set(due.map(t => t.sport + '|' + t.player).concat(dueCal.map(([k, v]) => v.sport + '|' + v.player)))].filter(k => LG[k.split('|')[0]]);
   const FR = {}; await pool(players, 10, async k => { const [sp, pl] = k.split('|'); FR[k] = await gameLog(sp, pl, true); });
+  const THF = due.concat(dueCal.map(([k, v]) => v)).some(t => t.sport === 'Tennis') ? await tennisHistory(true) : {};
   const actualOf = (sp, pl, st, start) => {
+    if (sp === 'Tennis') {
+      const m = (THF[norm(pl)] || []).find(x => Math.abs(Date.parse(x.m.d) - Date.parse(start.slice(0, 10))) <= 86400000 && x.m.done);
+      if (!m) return undefined; if (!tenFinal(m.m)) return null;   // retired or walkover: Underdog voids it
+      return tenVal(m.m, m.i, st);
+    }
     const gl = FR[sp + '|' + pl]; if (!gl || !supported(sp, st)) return undefined;
     const d0 = start.slice(0, 10), d1 = new Date(Date.parse(start) + 86400000).toISOString().slice(0, 10);
     const g = gl.games.find(z => z.date === d0) || gl.games.find(z => z.date === d1);
