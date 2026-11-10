@@ -129,9 +129,9 @@ function evaluate(o) {
   if (!o.mkt) { out.grade = 'Pass'; out.flags.push('no sportsbook prices this exact line'); return out; }
   const pr = o.pr;
   if (!pr || pr.err) { out.grade = 'Pass'; out.flags.push(pr && pr.err ? pr.err : 'no game log'); }
-  const pOver = pCal(o.mkt.over);
   let sOver = null;
   if (pr && !pr.err) { if (pr.pOver != null) sOver = pr.pOver; else { const s = sides(o.line, pr.mu, pr.v, pr.count); sOver = s.over / ((s.over + s.under) || 1); } out.flags.push(...pr.flags); }
+  const pOver = pCal(o.mkt.q === 'derived' && sOver != null ? 0.5 * o.mkt.over + 0.5 * sOver : o.mkt.over);   // books price the match, not the prop: lean on the player's results too
   if (o.mkt.q === 'derived') out.flags.push('books price the match, not this prop: ' + o.mkt.from);
   out.pBooks = o.mkt.over; out.pCal = pOver; out.pStats = sOver;
   if (sOver != null && Math.abs(sOver - o.mkt.over) >= 0.15) out.flags.push('game logs and books disagree (' + Math.round(sOver * 100) + '% vs ' + Math.round(o.mkt.over * 100) + '% over)');
@@ -253,9 +253,10 @@ function invPhi(p) {   // Acklam's inverse normal
   const q = p - 0.5, r = q * q; return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1);
 }
 // player prop chance from the match prices (total games, game spread, match winner)
-const SD_T = 4.5, SD_M = 4.5, RHO = -0.3;
+const SD_T = 5.5, SD_M = 5.5, RHO = -0.2;   // best-of-3: two-set and three-set matches make totals and margins wide
 function tennisDerived(T, player, st, line) {
-  const mine = T[norm(player)] || {}, best = arr => arr && arr.length ? (arr.find(x => x.sharp) || arr[0]) : null;
+  const mine = T[norm(player)] || {};
+  const best = arr => { if (!arr || !arr.length) return null; const pool = arr.some(x => x.sharp) ? arr.filter(x => x.sharp) : arr; return pool.slice().sort((a, b) => Math.abs(a.p - 0.5) - Math.abs(b.p - 0.5))[0]; };   // the main (most balanced) line
   const tot = best(mine['Total Games']), spr = best(mine['Games Spread']), win = best(mine['Sets Won|1.5']);
   const z = x => invPhi(x);
   if (st === 'Total Games' && tot) { const mu = tot.line + SD_T * z(tot.p); return { over: 1 - Phi((Math.ceil(line) - 0.5 - mu) / SD_T), q: 'derived', sharp: tot.sharp, books: [tot.src], from: 'match total ' + tot.line }; }
