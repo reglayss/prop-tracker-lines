@@ -174,7 +174,7 @@ function fetchLines_(sports, books, hoursAhead) {
   var now = new Date();
   var out = [], notes = [], soccerLeft = 30;
   if (quotaHitToday_()) throw new Error(quotaMsg_());
-  sports = sports.filter(function (sp) { return !/^soccer_/.test(sp) && sp !== 'tennis'; });   // soccer and tennis turned off
+  sports = sports.filter(function (sp) { return !/^soccer_/.test(sp); });   // soccer turned off
   sports = sports.filter(function (sp) { if (!MARKETS[sp]) { notes.push('Unknown sport "' + sp + '" skipped.'); return false; } return true; });
   var evRes = apiAll_(sports.map(function (sp) { return { path: '/sports/' + sp + '/events', params: {} }; }));
   var col = sports.filter(function (sp) { return sp !== 'basketball_ncaab' && EVENT_CAP[sp]; });
@@ -186,7 +186,7 @@ function fetchLines_(sports, books, hoursAhead) {
     var events = evRes[si];
     if (!events || events.error) { notes.push(label + ' (' + sport + '): could not load games.'); return; }
     events = events.data || events; if (!Array.isArray(events)) events = [];
-    var win = /^football_/.test(sport) ? 100 : (sport === 'tennis' || isCS2) ? 120 : isSoc ? 144 : hoursAhead;
+    var win = /^football_/.test(sport) ? 100 : sport === 'tennis' ? 36 : isCS2 ? 120 : isSoc ? 144 : hoursAhead;
     var untilS = new Date(now.getTime() + win * 3600 * 1000);
     events = events.filter(function (e) {
       var t = new Date(e.commence_time);
@@ -242,6 +242,7 @@ function parseEventOdds_(sport, ev, od, markets) {
   (od.bookmakers || []).forEach(function (bk) {
     if (/dabble|sleeper|betr|pick6/i.test(String(bk.key))) return;
     (bk.markets || []).forEach(function (m) {
+      if (sport === 'tennis' && /^(h2h|spreads|totals)$/.test(m.key)) { tennisMatchRows_(bk, m, ev, od, game, start, rows); return; }
       var stat = markets[m.key];
       if (!stat && sport === 'tennis' && !/^(h2h|spreads|totals)$/.test(m.key)) stat = prettify_(m.key);
       if (!stat) {
@@ -278,6 +279,18 @@ function parseEventOdds_(sport, ev, od, markets) {
   return Object.keys(rows).map(function (k) { return rows[k]; });
 }
 
+// tennis match prices become per-player rows the model can use: total games, game spread, and match winner (= 2 sets won)
+function tennisMatchRows_(bk, m, ev, od, game, start, rows) {
+  var oc = m.outcomes || [], players = [ev.home_team || od.home_team, ev.away_team || od.away_team].filter(Boolean);
+  var add = function (player, stat, line, over, under) {
+    if (!player || over == null || under == null || over === '' || under === '' || line == null) return;
+    rows[bk.key + '|' + player + '|' + stat + '|' + line + '|M'] = { sport: 'Tennis', game: game, start: start, bookKey: bk.key, book: BOOK_NAMES[bk.key] || bk.title || bk.key,
+      player: player, stat: stat, line: Number(line), over: over, under: under, type: 'Standard', sides: 'OU' };
+  };
+  if (m.key === 'totals') { var o = oc.filter(function (x) { return /over/i.test(x.name); })[0], u = oc.filter(function (x) { return /under/i.test(x.name); })[0]; if (o && u) players.forEach(function (p) { add(p, 'Total Games', o.point, o.price, u.price); }); }
+  else if (m.key === 'spreads' && oc.length === 2) oc.forEach(function (x, i) { add(x.name, 'Games Spread', x.point, x.price, oc[1 - i].price); });
+  else if (m.key === 'h2h' && oc.length === 2) oc.forEach(function (x, i) { add(x.name, 'Sets Won', 1.5, x.price, oc[1 - i].price); });
+}
 function prettify_(k) {
   return String(k).replace(/^(player|batter|pitcher|goalie)_/, '').split('_').map(cap_).join(' ');
 }
@@ -317,15 +330,17 @@ function resolveSports_(sports, notes) {
   return out;
 }
 
-var EVENT_CAP = { football_ncaaf: 60, basketball_ncaab: 0 };   // college slates are huge; most small-school games have no props
+var EVENT_CAP = { football_ncaaf: 60, basketball_ncaab: 0, tennis: 24 };   // college slates are huge; most small-school games have no props
 var AUTO_PULL_HOURS = [8, 10, 12, 14, 16, 17, 18, 19, 20, 21, 22];
-var UD_SPORT = { NBA: 'NBA', NFL: 'NFL', NHL: 'NHL', CBB: 'NCAAB', CFB: 'NCAAF' };
+var UD_SPORT = { NBA: 'NBA', NFL: 'NFL', NHL: 'NHL', CBB: 'NCAAB', CFB: 'NCAAF', TENNIS: 'Tennis' };
 var UD_STAT = {
   NBA: { points: 'Points', rebounds: 'Rebounds', assists: 'Assists', three_points_made: '3-Pointers', pts_rebs_asts: 'PRA', pts_rebs: 'Pts+Rebs', pts_asts: 'Pts+Asts', rebs_asts: 'Rebs+Asts', steals: 'Steals', blocks: 'Blocks', turnovers: 'Turnovers' },
   NFL: { passing_yds: 'Pass Yards', passing_tds: 'Pass TDs', passing_att: 'Pass Attempts', passing_comps: 'Completions', rushing_yds: 'Rush Yards', receiving_yds: 'Rec Yards', receiving_rec: 'Receptions', rush_rec_yds: 'Rush+Rec Yards' },
   NHL: { shots: 'Shots on Goal', points: 'Points', assists: 'Assists', power_play_points: 'Power Play Points', saves: 'Saves', blocked_shots: 'Blocked Shots' }
 };
 UD_STAT.NCAAB = UD_STAT.NBA; UD_STAT.NCAAF = UD_STAT.NFL;
+UD_STAT.Tennis = { games_won: 'Games Won', games_played: 'Total Games', sets_won: 'Sets Won', sets_played: 'Total Sets', tie_breakers_played: 'Tiebreaks Played',
+  period_1_games_won: '1st Set Games Won', period_1_games_played: '1st Set Total Games', aces: 'Aces', double_faults: 'Double Faults', period_1_aces: '1st Set Aces', points_won: 'Points Won' };
 function fetchUnderdog_(notes) {
   var res; try { res = ufetch_('https://api.underdogfantasy.com/v1/over_under_lines', { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' }, muteHttpExceptions: true }); }
   catch (e) { notes.push('Underdog: could not connect.'); return []; }
@@ -333,6 +348,7 @@ function fetchUnderdog_(notes) {
   var j; try { j = JSON.parse(res.getContentText()); } catch (e) { notes.push('Underdog: unreadable reply.'); return []; }
   var games = {}, players = {}, apps = {}, now = Date.now();
   (j.games || []).forEach(function (g) { games[g.id] = g; });
+  (j.solo_games || []).forEach(function (g) { games[g.id] = Object.assign({ full_team_names_title: (g.away_player_name || '') + ' @ ' + (g.home_player_name || '') }, g); });   // tennis matches
   (j.players || []).forEach(function (p) { players[p.id] = p; });
   (j.appearances || []).forEach(function (a) { apps[a.id] = a; });
   var out = [];
