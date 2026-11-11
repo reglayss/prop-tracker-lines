@@ -6,7 +6,8 @@
 // Writes model.json (for the site), tracker.json (model performance), calib.json (calibration data).
 const fs = require('fs');
 const BE = 0.5503;                  // per-leg break-even of a 3-pick 6x entry
-const PLAY_EV = 0.06, LEAN_EV = 0.03;
+const PLAY_EV = 0.08, LEAN_EV = 0.05;   // tiny edges are noise; only clear ones get through
+const MAX_PICKS = 20, MAX_PER_GAME = 2;
 const CACHE_DIR = '.cache';
 const now = Date.now();
 const rd = (f, d) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) { return d; } };
@@ -119,7 +120,8 @@ function refit() {
     for (const r of rows) { const x = lg(cl(r.p)), p = sg(w[0] + w[1] * x), e = p - r.y, q = p * (1 - p); g0 += e; g1 += e * x; h00 += q; h01 += q * x; h11 += q * x * x; }
     const det = h00 * h11 - h01 * h01; w = [w[0] - (h11 * g0 - h01 * g1) / det, w[1] - (h00 * g1 - h01 * g0) / det];
   }
-  calib.a = Math.max(-0.3, Math.min(0.3, w[0])); calib.b = Math.max(0.5, Math.min(1.1, w[1])); calib.fitN = rows.length; calib.fitAt = new Date(now).toISOString();
+  const k = rows.length / (rows.length + 10000);   // trust the fit only as much as the sample size earns
+  calib.a = Math.max(-0.08, Math.min(0.08, k * w[0])); calib.b = Math.max(0.85, Math.min(1.15, 1 + k * (w[1] - 1))); calib.fitN = rows.length; calib.fitAt = new Date(now).toISOString();
 }
 const pCal = pm => sg(calib.a + calib.b * lg(cl(pm)));
 
@@ -153,6 +155,8 @@ function evaluate(o) {
       if (!o.mkt.sharp) { why.push('long shot without a Pinnacle price'); grade = 'Pass'; }
       else if (grade === 'Play') { grade = 'Lean'; why.push('long shot: capped at Lean'); }
     }
+    if (o.line <= 0.5 && sd === 'Under' && grade !== 'Pass') { why.push('yes/no prop: Unders skipped'); grade = 'Pass'; }
+    if (o.line <= 0.5 && sd === 'Over' && m < 1.3 && grade !== 'Pass') { why.push('yes/no prop without a boost: skipped'); grade = 'Pass'; }
     if (o.inj === 'out') { why.unshift('player listed out'); grade = 'Pass'; }
     if (o.inj === 'q' && grade === 'Play') { why.push('questionable'); grade = 'Lean'; }
     out.sides[sd] = { grade, pay: m, p, pStats: ps, pBooksSide: sd === 'Over' ? o.mkt.over : 1 - o.mkt.over, ev, evStats: evS, hits5, why };
@@ -324,6 +328,16 @@ function tennisDerived(T, player, st, line) {
     if (mkt && mkt.q !== 'derived') { const pk = [x.sport, x.player, x.stat, x.line, before].join('|'); pending[pk] = { p: +mkt.over.toFixed(4), sport: x.sport, player: x.player, stat: x.stat, line: Number(x.line), start: x.start }; }
   }
   board.sort((a, b) => (b.grade === 'Play') - (a.grade === 'Play') || b.ev - a.ev);
+  { const perGame = {}, perPlayer = {}, kept = [];
+    for (const r of board) {
+      const gk = r.sport + '|' + r.game, pk = r.sport + '|' + r.player;
+      if (kept.length >= MAX_PICKS || (perGame[gk] || 0) >= MAX_PER_GAME || perPlayer[pk]) {
+        const vk = [r.sport, r.player, r.stat, r.line, r.app, r.side].join('|'); if (verdicts[vk]) { verdicts[vk][0] = 'Pass'; verdicts[vk][4] = 'outranked by stronger picks today' + (verdicts[vk][4] ? ' \u00b7 ' + verdicts[vk][4] : ''); }
+        continue;
+      }
+      perGame[gk] = (perGame[gk] || 0) + 1; perPlayer[pk] = 1; kept.push(r);
+    }
+    board.length = 0; kept.forEach(r => board.push(r)); }
   // track every recommendation; the last pregame version is what counts
   const seenNow = new Set();
   for (const r of board) {
